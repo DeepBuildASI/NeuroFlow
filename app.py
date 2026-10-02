@@ -624,7 +624,6 @@ else:
         st.info("Log empty — no device connected.")
     else:
         st.info("No predictions yet.")
-
 st.markdown("---")
 st.markdown('<div class="footer">A818_NF · Brain Signal Decoder · v3.1 · Built by Asma Rizwan Rao</div>', unsafe_allow_html=True)
 
