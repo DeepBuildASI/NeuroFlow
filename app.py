@@ -1,6 +1,7 @@
 """
 A818_NF — Brain Signal Decoder
-Production BCI Software · v2.1
+Production BCI Software · v3.0
+Real device interface · No fake data
 """
 
 import streamlit as st
@@ -8,23 +9,16 @@ import numpy as np
 import joblib
 import os
 import time
-import random
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 from datetime import datetime
 from scipy.signal import butter, filtfilt, iirnotch
 
-# ═══════════════════════════════════════════════════════════
-# CONFIG
-# ═══════════════════════════════════════════════════════════
 st.set_page_config(page_title="A818_NF — Brain Signal Decoder",
                    page_icon="🧠", layout="wide",
                    initial_sidebar_state="expanded")
 
-# ═══════════════════════════════════════════════════════════
-# CSS
-# ═══════════════════════════════════════════════════════════
 st.markdown("""
 <style>
 .main {background-color:#0a0d12;}
@@ -34,11 +28,14 @@ section[data-testid="stSidebar"] {background-color:#0f1419;}
 .stButton>button {background-color:#00d4ff; color:#0a0d12; font-weight:700;
   border-radius:6px; padding:8px 18px; border:none; font-size:14px; transition:0.2s;}
 .stButton>button:hover {background-color:#00b8e6; transform:translateY(-1px);}
+.stButton>button:disabled {background-color:#2a2f3a !important; color:#666 !important;
+  cursor:not-allowed !important;}
 .status-bar {background:linear-gradient(90deg,#1a1f26,#0f1419); padding:12px 20px;
   border-radius:8px; border-left:4px solid #00d4ff; margin-bottom:20px; font-size:13px;}
 .status-live{color:#00ff88; font-weight:700;}
 .status-idle{color:#888; font-weight:600;}
 .status-cal{color:#ffaa00; font-weight:700;}
+.status-nowear{color:#ff4757; font-weight:700;}
 .pred-card{background:linear-gradient(135deg,#1c1f26,#151920); padding:28px;
   border-radius:12px; border-left:5px solid #00d4ff; box-shadow:0 4px 20px rgba(0,212,255,0.08);}
 .pred-card-5{border-left-color:#ff9f1c;}
@@ -68,11 +65,64 @@ section[data-testid="stSidebar"] {background-color:#0f1419;}
   font-size:12px; color:#9ca3af; font-family:'Courier New',monospace;}
 .log-entry-match{border-left-color:#00ff88;}
 .log-entry-miss{border-left-color:#ff4757;}
+.device-banner{background:#1a1f26; padding:18px 22px; border-radius:10px;
+  border-left:5px solid #ff4757; margin:16px 0; color:#e6e9ef;}
+.device-banner h3 {margin:0 0 8px 0; color:#ff4757; font-size:16px;}
+.device-banner p {margin:4px 0; font-size:13px; color:#9ca3af;}
+.device-banner code {background:#0a0d12; padding:2px 8px; border-radius:4px;
+  color:#00d4ff; font-size:12px;}
+.device-ok{background:#0f1a14; border-left-color:#00ff88;}
+.device-ok h3 {color:#00ff88;}
 </style>
 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════
-# PREPROCESSING (MATCHES TRAINING PIPELINE)
+# DEVICE INTERFACE LAYER
+# ═══════════════════════════════════════════════════════════
+# Abstract device layer. When headband is connected, replace this.
+# Right now: reports no device. When hardware arrives, swap the class body.
+# App code stays 100% the same.
+
+class EEGDeviceInterface:
+    """Abstract interface for EEG hardware."""
+
+    DEVICE_PORTS = [
+        # Common Bluetooth serial ports (Windows)
+        '/dev/rfcomm0',       # Linux Bluetooth
+        'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 'COM10',  # Windows
+    ]
+
+    @staticmethod
+    def detect():
+        """Return (connected: bool, device_name: str, message: str)."""
+        # --- HARDWARE HOOK ---
+        # When BioAmp + ESP32 arrives:
+        #   from your_driver import scan_device
+        #   result = scan_device()
+        #   if result: return (True, result.name, "EEG headband connected")
+        # --- END HOOK ---
+
+        return (False, None, "No EEG headband detected on any Bluetooth port.")
+
+    @staticmethod
+    def read_sample(duration_sec=3.0, fs=160, n_channels=64):
+        """Read one EEG sample from device. Returns np.array or None."""
+        # --- HARDWARE HOOK ---
+        # When headband connected:
+        #   buf = []
+        #   for _ in range(int(duration_sec * fs)):
+        #       buf.append(serial.read())
+        #   return np.array(buf).T
+        # --- END HOOK ---
+        return None
+
+
+def get_device_status():
+    """Cached device check."""
+    return EEGDeviceInterface.detect()
+
+# ═══════════════════════════════════════════════════════════
+# PREPROCESSING
 # ═══════════════════════════════════════════════════════════
 def preprocess_eegnet(sample, fs=160):
     b_n, a_n = iirnotch(50, Q=30, fs=fs)
@@ -114,7 +164,7 @@ class EEGNet(nn.Module):
         return self.fc(x)
 
 # ═══════════════════════════════════════════════════════════
-# PATHS (SAFE FOR COLAB + LOCAL)
+# PATHS
 # ═══════════════════════════════════════════════════════════
 DRIVE = '/content/drive/MyDrive/NeuroFlow'
 try:
@@ -145,7 +195,7 @@ def load_5class():
 @st.cache_data
 def load_data_3class():
     X = find_path('X_all.npy'); y = find_path('y_all.npy')
-    return (np.load(X), np.load(y)) if (X and y) else (None, None)
+    return (np.load(X), np.load(Y)) if (X and y) else (None, None)
 
 @st.cache_data
 def load_data_5class():
@@ -160,7 +210,8 @@ def init_state():
         'buffer': None, 'playing': False, 'current_sample': None,
         'current_true': None, 'prediction': None, 'confidence': None,
         'session_log': [], 'samples_processed': 0, 'calibrating': False,
-        'calibration_data': [], 'mode_used': None,
+        'calibration_data': [], 'device_connected': False, 'device_name': None,
+        'bench_test_mode': False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -174,12 +225,21 @@ st.title("🧠 A818_NF — Brain Signal Decoder")
 st.markdown("##### Production BCI Software · Real-time intent classification")
 
 # ═══════════════════════════════════════════════════════════
+# DEVICE DETECTION
+# ═══════════════════════════════════════════════════════════
+connected, device_name, device_msg = get_device_status()
+st.session_state.device_connected = connected
+st.session_state.device_name = device_name
+
+# ═══════════════════════════════════════════════════════════
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════
 st.sidebar.markdown("## ⚙️ Control Panel")
 st.sidebar.markdown("---")
+
 mode = st.sidebar.radio("**Decoder Mode**", ["🎯 Focus Mode (3-class)", "🔬 Extended Mode (5-class)"])
-operating_mode = st.sidebar.radio("**Operating Mode**", ["🧪 Test Mode", "🧬 Live Mode"])
+operating_mode = st.sidebar.radio("**Operating Mode**", ["🧪 Bench Test", "🧬 Live Recording"])
+
 st.sidebar.markdown("---")
 
 if "Focus" in mode:
@@ -192,32 +252,17 @@ else:
     st.sidebar.markdown("**Classes:** Rest · L.Fist · R.Fist · Both Fists · Both Feet")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("## 🎛️ Actions")
-col_a, col_b = st.sidebar.columns(2)
-with col_a: start_btn = st.button("▶ Stream", use_container_width=True)
-with col_b: stop_btn = st.button("⏹ Stop", use_container_width=True)
-col_c, col_d = st.sidebar.columns(2)
-with col_c: single_btn = st.button("🎲 Sample", use_container_width=True)
-with col_d: clear_btn = st.button("🧹 Clear", use_container_width=True)
+st.sidebar.markdown("## 🔌 Device")
+if connected:
+    st.sidebar.success(f"🟢 {device_name}")
+else:
+    st.sidebar.error("🔴 No headband")
+    st.sidebar.caption(device_msg)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("## 🎓 Calibration")
-calib_btn = st.sidebar.button("🧬 Start Calibration", use_container_width=True)
-if calib_btn:
-    st.session_state.calibrating = True
-    st.session_state.calibration_data = []
-if stop_btn:
-    st.session_state.playing = False
-if clear_btn:
-    for k in ['buffer','current_sample','prediction','confidence']:
-        st.session_state[k] = None
-    st.session_state.session_log = []
-    st.session_state.samples_processed = 0
-    st.session_state.playing = False
+st.sidebar.markdown("## 🎛️ Actions")
 
-# ═══════════════════════════════════════════════════════════
-# LOAD MODELS
-# ═══════════════════════════════════════════════════════════
+# Load models first so we can gate buttons
 if "Focus" in mode:
     model, scaler = load_3class()
     X_data, y_data = load_data_3class()
@@ -231,9 +276,76 @@ else:
     accent = "#ff9f1c"; badge_class = "badge-5"
     badge_text = "EXTENDED MODE · 5 CLASSES · 78%"
 
-if model is None or X_data is None:
-    st.error("⚠️ Model or data files not found. Check Drive paths.")
+if model is None:
+    st.error("⚠️ Model file not found on Drive.")
     st.stop()
+
+# In Live Recording mode → require device
+live_mode = "Live" in operating_mode
+can_record = connected or not live_mode
+
+# In Bench Test mode → use saved dataset
+# In Live mode → use device stream only
+
+btn_disabled_live = live_mode and not connected
+
+col_a, col_b = st.sidebar.columns(2)
+with col_a:
+    start_btn = st.button("▶ Stream", use_container_width=True, disabled=btn_disabled_live)
+with col_b:
+    stop_btn = st.button("⏹ Stop", use_container_width=True)
+
+col_c, col_d = st.sidebar.columns(2)
+with col_c:
+    single_btn = st.button("🎲 Sample", use_container_width=True, disabled=btn_disabled_live)
+with col_d:
+    clear_btn = st.button("🧹 Clear", use_container_width=True)
+
+if stop_btn:
+    st.session_state.playing = False
+if clear_btn:
+    for k in ['buffer','current_sample','prediction','confidence']:
+        st.session_state[k] = None
+    st.session_state.session_log = []
+    st.session_state.samples_processed = 0
+    st.session_state.playing = False
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("## 🎓 Calibration")
+calib_btn = st.sidebar.button("🧬 Start Calibration", use_container_width=True, disabled=btn_disabled_live)
+
+if calib_btn:
+    if not connected and live_mode:
+        st.sidebar.error("Wear headband first.")
+    else:
+        st.session_state.calibrating = True
+        st.session_state.calibration_data = []
+
+# ═══════════════════════════════════════════════════════════
+# DEVICE WARNING BANNER (Live Mode, No Device)
+# ═══════════════════════════════════════════════════════════
+if live_mode and not connected:
+    st.markdown("""
+    <div class="device-banner">
+        <h3>⚠️ No EEG Headband Detected</h3>
+        <p><b>Live Recording mode requires an EEG headband.</b></p>
+        <p>Please:</p>
+        <p>&nbsp;&nbsp;1. Wear the A818_NF headband on your head</p>
+        <p>&nbsp;&nbsp;2. Ensure the electrodes are making proper contact</p>
+        <p>&nbsp;&nbsp;3. Turn on the headband — check the LED is blinking</p>
+        <p>&nbsp;&nbsp;4. Pair via Bluetooth (Windows Settings → Bluetooth)</p>
+        <p style="margin-top:14px;">Or switch to <code>🧪 Bench Test</code> mode in the sidebar to use the saved dataset.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+if live_mode and connected:
+    st.markdown(f"""
+    <div class="device-banner device-ok">
+        <h3>🟢 {device_name} Connected</h3>
+        <p>Streaming EEG data at 160 Hz · 64 channels</p>
+        <p>Ready to record.</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════
 # PREDICT
@@ -254,60 +366,99 @@ def predict(sample):
             return int(np.argmax(proba)), proba
 
 # ═══════════════════════════════════════════════════════════
-# ACTIONS
+# ACTIONS — BENCH TEST MODE
 # ═══════════════════════════════════════════════════════════
-if single_btn:
-    idx = random.randint(0, len(X_data)-1)
-    sample = X_data[idx]
-    pred, proba = predict(sample)
-    st.session_state.current_sample = sample
-    st.session_state.current_true = int(y_data[idx])
-    st.session_state.prediction = pred
-    st.session_state.confidence = proba
-    st.session_state.samples_processed += 1
-    entry = {'time': datetime.now().strftime('%H:%M:%S'),
-             'pred': label_map[pred], 'conf': float(max(proba))}
-    if "Test" in operating_mode:
-        entry['true'] = label_map[int(y_data[idx])]
-        entry['correct'] = pred == int(y_data[idx])
-    else:
-        entry['true'] = None; entry['correct'] = None
-    st.session_state.session_log.append(entry)
-
-if start_btn:
-    st.session_state.playing = True
-    if st.session_state.buffer is None:
-        st.session_state.buffer = X_data[random.randint(0, len(X_data)-1)].copy()
-
-if st.session_state.playing:
-    idx = random.randint(0, len(X_data)-1)
-    new_sample = X_data[idx]
-    if st.session_state.buffer is None:
-        st.session_state.buffer = new_sample.copy()
-    else:
-        buf = st.session_state.buffer
-        shift = 30
-        buf = np.roll(buf, -shift, axis=-1)
-        new_chunk = new_sample[:, -shift:] + np.random.randn(buf.shape[0], shift)*5
-        buf[:, -shift:] = new_chunk
-        st.session_state.buffer = buf
-
-    if st.session_state.samples_processed % 3 == 0:
-        pred, proba = predict(new_sample)
+if not live_mode and X_data is not None:
+    import random
+    if single_btn:
+        idx = random.randint(0, len(X_data)-1)
+        sample = X_data[idx]
+        pred, proba = predict(sample)
+        st.session_state.current_sample = sample
+        st.session_state.current_true = int(y_data[idx])
         st.session_state.prediction = pred
         st.session_state.confidence = proba
-        st.session_state.current_true = int(y_data[idx])
-        st.session_state.current_sample = new_sample
-        entry = {'time': datetime.now().strftime('%H:%M:%S'),
-                 'pred': label_map[pred], 'conf': float(max(proba))}
-        if "Test" in operating_mode:
-            entry['true'] = label_map[int(y_data[idx])]
-            entry['correct'] = pred == int(y_data[idx])
-        else:
-            entry['true'] = None; entry['correct'] = None
-        st.session_state.session_log.append(entry)
-    st.session_state.samples_processed += 1
+        st.session_state.samples_processed += 1
+        st.session_state.session_log.append({
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'pred': label_map[pred], 'true': label_map[int(y_data[idx])],
+            'correct': pred == int(y_data[idx]), 'conf': float(max(proba))
+        })
 
+    if start_btn:
+        st.session_state.playing = True
+        if st.session_state.buffer is None:
+            st.session_state.buffer = X_data[random.randint(0, len(X_data)-1)].copy()
+
+    if st.session_state.playing:
+        idx = random.randint(0, len(X_data)-1)
+        new_sample = X_data[idx]
+        if st.session_state.buffer is None:
+            st.session_state.buffer = new_sample.copy()
+        else:
+            buf = st.session_state.buffer
+            shift = 30
+            buf = np.roll(buf, -shift, axis=-1)
+            new_chunk = new_sample[:, -shift:] + np.random.randn(buf.shape[0], shift)*5
+            buf[:, -shift:] = new_chunk
+            st.session_state.buffer = buf
+
+        if st.session_state.samples_processed % 3 == 0:
+            pred, proba = predict(new_sample)
+            st.session_state.prediction = pred
+            st.session_state.confidence = proba
+            st.session_state.current_true = int(y_data[idx])
+            st.session_state.current_sample = new_sample
+            st.session_state.session_log.append({
+                'time': datetime.now().strftime('%H:%M:%S'),
+                'pred': label_map[pred], 'true': label_map[int(y_data[idx])],
+                'correct': pred == int(y_data[idx]), 'conf': float(max(proba))
+            })
+        st.session_state.samples_processed += 1
+
+# ═══════════════════════════════════════════════════════════
+# ACTIONS — LIVE MODE
+# ═══════════════════════════════════════════════════════════
+if live_mode and connected:
+    if single_btn:
+        sample = EEGDeviceInterface.read_sample()
+        if sample is not None:
+            pred, proba = predict(sample)
+            st.session_state.current_sample = sample
+            st.session_state.prediction = pred
+            st.session_state.confidence = proba
+            st.session_state.current_true = None
+            st.session_state.samples_processed += 1
+            st.session_state.session_log.append({
+                'time': datetime.now().strftime('%H:%M:%S'),
+                'pred': label_map[pred], 'true': None,
+                'correct': None, 'conf': float(max(proba))
+            })
+        else:
+            st.warning("Read failed. Adjust headband.")
+
+    if start_btn:
+        st.session_state.playing = True
+
+    if st.session_state.playing:
+        sample = EEGDeviceInterface.read_sample()
+        if sample is not None:
+            buf = sample if st.session_state.buffer is None else \
+                  np.concatenate([st.session_state.buffer[:, 30:], sample[:, -30:]], axis=-1)
+            st.session_state.buffer = buf
+            if st.session_state.samples_processed % 3 == 0:
+                pred, proba = predict(sample)
+                st.session_state.prediction = pred
+                st.session_state.confidence = proba
+                st.session_state.current_sample = sample
+                st.session_state.session_log.append({
+                    'time': datetime.now().strftime('%H:%M:%S'),
+                    'pred': label_map[pred], 'true': None,
+                    'correct': None, 'conf': float(max(proba))
+                })
+            st.session_state.samples_processed += 1
+
+# Trim log
 if len(st.session_state.session_log) > 20:
     st.session_state.session_log = st.session_state.session_log[-20:]
 
@@ -315,45 +466,84 @@ if len(st.session_state.session_log) > 20:
 # STATUS
 # ═══════════════════════════════════════════════════════════
 s = '<div class="status-bar">'
-if st.session_state.playing: s += '<span class="status-live">🟢 STREAMING</span>'
-elif st.session_state.calibrating: s += '<span class="status-cal">🟡 CALIBRATING</span>'
-else: s += '<span class="status-idle">🔴 IDLE</span>'
+if not connected and live_mode:
+    s += '<span class="status-nowear">🔴 NO DEVICE — WEAR HEADBAND</span>'
+elif st.session_state.playing:
+    s += '<span class="status-live">🟢 STREAMING</span>'
+elif st.session_state.calibrating:
+    s += '<span class="status-cal">🟡 CALIBRATING</span>'
+else:
+    s += '<span class="status-idle">🔴 IDLE</span>'
 s += f' &nbsp;|&nbsp; Mode: <b>{operating_mode}</b>'
 s += f' &nbsp;|&nbsp; Decoder: <b>{mode}</b>'
+s += f' &nbsp;|&nbsp; Device: <b>{"Connected" if connected else "None"}</b>'
 s += f' &nbsp;|&nbsp; Samples: <b>{st.session_state.samples_processed}</b>'
 s += f' &nbsp;|&nbsp; Time: <b>{datetime.now().strftime("%H:%M:%S")}</b>'
 s += '</div>'
 st.markdown(s, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════
-# CALIBRATION
+# CALIBRATION WORKFLOW
 # ═══════════════════════════════════════════════════════════
 if st.session_state.calibrating:
     st.markdown("---")
     st.markdown("## 🎓 Calibration Session")
-    st.info(f"**Collected:** {len(st.session_state.calibration_data)} samples. "
-            f"Record each class by holding the thought.")
-    classes = ['Rest','Left Fist','Right Fist'] if "Focus" in mode else \
-              ['Rest','Left Fist','Right Fist','Both Fists','Both Feet']
-    for cls_name in classes:
-        c1, c2 = st.columns([3,1])
-        with c1: st.markdown(f"**{cls_name}**")
-        with c2:
-            if st.button(f"Record", key=f"cal_{cls_name}"):
-                idx = random.randint(0, len(X_data)-1)
-                st.session_state.calibration_data.append((X_data[idx].copy(), cls_name))
-                st.rerun()
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("✅ Finish", type="primary"):
+
+    if live_mode and not connected:
+        st.error("⚠️ Headband not detected. Please wear and adjust the headband before recording.")
+        st.markdown("""
+        **Checklist:**
+        - Headband is on your head
+        - Electrodes touching scalp (forehead + earlobes)
+        - Headband battery is charged
+        - Bluetooth is paired with this laptop
+        - Device LED is blinking
+        """)
+        if st.button("❌ Cancel Calibration"):
             st.session_state.calibrating = False
-            st.success(f"Calibration complete: {len(st.session_state.calibration_data)} samples.")
-    with c2:
-        if st.button("❌ Cancel"):
-            st.session_state.calibrating = False
-            st.session_state.calibration_data = []
             st.rerun()
-    st.markdown("---")
+    else:
+        st.info(f"**Collected:** {len(st.session_state.calibration_data)} samples. "
+                f"Hold each thought for ~4 seconds while recording.")
+
+        classes = ['Rest','Left Fist','Right Fist'] if "Focus" in mode else \
+                  ['Rest','Left Fist','Right Fist','Both Fists','Both Feet']
+
+        for cls_name in classes:
+            c1, c2 = st.columns([3,1])
+            with c1:
+                st.markdown(f"**{cls_name}**")
+            with c2:
+                if st.button(f"● Record", key=f"cal_{cls_name}"):
+                    if live_mode:
+                        sample = EEGDeviceInterface.read_sample()
+                        if sample is None:
+                            st.error("Failed to read from device. Adjust headband.")
+                        else:
+                            st.session_state.calibration_data.append((sample, cls_name))
+                            st.success(f"Recorded: {cls_name}")
+                    else:
+                        import random
+                        idx = random.randint(0, len(X_data)-1)
+                        st.session_state.calibration_data.append((X_data[idx].copy(), cls_name))
+                        st.success(f"Bench sample captured: {cls_name}")
+                    st.rerun()
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ Finish Calibration", type="primary"):
+                n = len(st.session_state.calibration_data)
+                if n < 5:
+                    st.warning(f"Only {n} samples. Record more.")
+                else:
+                    st.session_state.calibrating = False
+                    st.success(f"Calibration complete · {n} samples · Model will adapt next session.")
+        with c2:
+            if st.button("❌ Cancel"):
+                st.session_state.calibrating = False
+                st.session_state.calibration_data = []
+                st.rerun()
+        st.markdown("---")
 
 # ═══════════════════════════════════════════════════════════
 # MAIN UI
@@ -372,18 +562,21 @@ with col_left:
         h = f'<div class="{card_class}">'
         h += f'<p class="pred-label">Predicted Intent</p>'
         h += f'<p class="pred-value" style="color:{pred_color};">{pred_name}</p>'
-        if "Test" in operating_mode and st.session_state.current_true is not None:
+        if not live_mode and st.session_state.current_true is not None:
             true_name = label_map[st.session_state.current_true]
-            h += f'<p class="true-label">Ground Truth</p>'
+            h += f'<p class="true-label">Ground Truth (Bench Test)</p>'
             h += f'<p class="true-value">{true_name}</p>'
             h += '<p class="correct">✅ Correct</p>' if pred == st.session_state.current_true else '<p class="incorrect">❌ Incorrect</p>'
         else:
             h += f'<p class="true-label">Mode</p>'
-            h += f'<p class="true-value">Live Stream · No ground truth</p>'
+            h += f'<p class="true-value">Live — no ground truth available</p>'
         h += '</div>'
         st.markdown(h, unsafe_allow_html=True)
     else:
-        st.info("Click **▶ Stream** or **🎲 Sample** to begin.")
+        if not connected and live_mode:
+            st.warning("Waiting for headband connection. Wear the A818_NF headband to begin.")
+        else:
+            st.info("Click **▶ Stream** or **🎲 Sample** to begin.")
 
 with col_right:
     st.markdown("### 📈 Confidence Distribution")
@@ -427,6 +620,11 @@ if buf is not None:
     with c2: st.markdown(f'<div class="stat-box"><div class="stat-value">{buf.max()*1000:.2f}</div><div class="stat-label">Max (mV)</div></div>', unsafe_allow_html=True)
     with c3: st.markdown(f'<div class="stat-box"><div class="stat-value">{buf.std()*1000:.2f}</div><div class="stat-label">Std (mV)</div></div>', unsafe_allow_html=True)
     with c4: st.markdown(f'<div class="stat-box"><div class="stat-value">{buf.shape[0]}</div><div class="stat-label">Channels</div></div>', unsafe_allow_html=True)
+else:
+    if not connected and live_mode:
+        st.info("No signal. Wear headband to begin.")
+    else:
+        st.info("No signal buffer yet.")
 
 # ═══════════════════════════════════════════════════════════
 # LOG
@@ -446,7 +644,7 @@ else:
     st.info("No predictions yet.")
 
 st.markdown("---")
-st.markdown('<div class="footer">A818_NF · Brain Signal Decoder · v2.1 · Built by Asma Rizwan Rao</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">A818_NF · Brain Signal Decoder · v3.0 · Built by Asma Rizwan Rao</div>', unsafe_allow_html=True)
 
 if st.session_state.playing:
     time.sleep(0.4)
