@@ -1,81 +1,90 @@
 """
 A818_NF — Brain Signal Decoder
-Professional BCI Interface
+Production BCI Software · v2.1
 """
 
 import streamlit as st
 import numpy as np
 import joblib
 import os
-import matplotlib.pyplot as plt
+import time
+import random
 import torch
 import torch.nn as nn
+import matplotlib.pyplot as plt
+from datetime import datetime
+from scipy.signal import butter, filtfilt, iirnotch
 
-# ============================================
-# PAGE CONFIG
-# ============================================
-st.set_page_config(
-    page_title="A818_NF — Brain Signal Decoder",
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# ═══════════════════════════════════════════════════════════
+# CONFIG
+# ═══════════════════════════════════════════════════════════
+st.set_page_config(page_title="A818_NF — Brain Signal Decoder",
+                   page_icon="🧠", layout="wide",
+                   initial_sidebar_state="expanded")
 
-# ============================================
-# CUSTOM CSS
-# ============================================
+# ═══════════════════════════════════════════════════════════
+# CSS
+# ═══════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-    .main { background-color: #0e1117; }
-    h1 { color: #00d4ff; font-family: 'Segoe UI', sans-serif; font-weight: 700; }
-    h2, h3 { color: #e0e0e0; font-family: 'Segoe UI', sans-serif; }
-    .stButton>button {
-        background-color: #00d4ff;
-        color: #0e1117;
-        font-weight: 700;
-        border-radius: 8px;
-        padding: 10px 24px;
-        border: none;
-        font-size: 15px;
-    }
-    .stButton>button:hover { background-color: #00b8e6; }
-    .mode-badge {
-        display: inline-block;
-        padding: 6px 14px;
-        border-radius: 20px;
-        font-size: 13px;
-        font-weight: 600;
-        margin-bottom: 12px;
-    }
-    .badge-3 { background-color: #00d4ff; color: #0e1117; }
-    .badge-5 { background-color: #ff9f1c; color: #0e1117; }
-    .prediction-card {
-        background-color: #1c1f26;
-        padding: 24px;
-        border-radius: 12px;
-        border-left: 5px solid #00d4ff;
-    }
-    .stat-box {
-        background-color: #1c1f26;
-        padding: 16px;
-        border-radius: 8px;
-        text-align: center;
-        border: 1px solid #2a2f3a;
-    }
-    .stat-value { color: #00d4ff; font-size: 26px; font-weight: 700; }
-    .stat-label { color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
-    .footer {
-        text-align: center;
-        color: #555;
-        font-size: 12px;
-        padding: 20px 0;
-    }
+.main {background-color:#0a0d12;}
+h1 {color:#00d4ff; font-weight:700; letter-spacing:-0.5px;}
+h2,h3 {color:#e6e9ef; font-weight:600;}
+section[data-testid="stSidebar"] {background-color:#0f1419;}
+.stButton>button {background-color:#00d4ff; color:#0a0d12; font-weight:700;
+  border-radius:6px; padding:8px 18px; border:none; font-size:14px; transition:0.2s;}
+.stButton>button:hover {background-color:#00b8e6; transform:translateY(-1px);}
+.status-bar {background:linear-gradient(90deg,#1a1f26,#0f1419); padding:12px 20px;
+  border-radius:8px; border-left:4px solid #00d4ff; margin-bottom:20px; font-size:13px;}
+.status-live{color:#00ff88; font-weight:700;}
+.status-idle{color:#888; font-weight:600;}
+.status-cal{color:#ffaa00; font-weight:700;}
+.pred-card{background:linear-gradient(135deg,#1c1f26,#151920); padding:28px;
+  border-radius:12px; border-left:5px solid #00d4ff; box-shadow:0 4px 20px rgba(0,212,255,0.08);}
+.pred-card-5{border-left-color:#ff9f1c;}
+.pred-label{color:#6b7280; font-size:11px; letter-spacing:2px; text-transform:uppercase; margin:0;}
+.pred-value{font-size:34px; font-weight:800; margin:6px 0 0 0; letter-spacing:-1px;}
+.true-label{color:#9ca3af; font-size:14px; margin:16px 0 4px 0;}
+.true-value{color:#e6e9ef; font-size:20px; font-weight:600; margin:0;}
+.correct{color:#00ff88; font-weight:700; font-size:14px; margin-top:14px;}
+.incorrect{color:#ff4757; font-weight:700; font-size:14px; margin-top:14px;}
+.conf-row{display:flex; align-items:center; margin-bottom:10px;}
+.conf-name{color:#9ca3af; font-size:13px; width:120px; font-weight:500;}
+.conf-bar-bg{flex:1; height:8px; background:#1a1f26; border-radius:4px; overflow:hidden;}
+.conf-bar-fill{height:100%; background:linear-gradient(90deg,#00d4ff,#00b8e6); border-radius:4px;}
+.conf-bar-fill-5{background:linear-gradient(90deg,#ff9f1c,#ff7b00);}
+.conf-pct{color:#e6e9ef; font-size:12px; margin-left:12px; width:60px;
+  text-align:right; font-variant-numeric:tabular-nums;}
+.stat-box{background:#131720; padding:16px 12px; border-radius:8px; text-align:center;
+  border:1px solid #1f242e;}
+.stat-value{color:#00d4ff; font-size:22px; font-weight:700; font-variant-numeric:tabular-nums;}
+.stat-label{color:#6b7280; font-size:10px; text-transform:uppercase; letter-spacing:1.5px; margin-top:4px;}
+.mode-badge{display:inline-block; padding:6px 14px; border-radius:20px; font-size:12px;
+  font-weight:700; letter-spacing:1px; margin-bottom:16px;}
+.badge-3{background:rgba(0,212,255,0.15); color:#00d4ff; border:1px solid #00d4ff;}
+.badge-5{background:rgba(255,159,28,0.15); color:#ff9f1c; border:1px solid #ff9f1c;}
+.footer{text-align:center; color:#4b5563; font-size:11px; padding:30px 0 10px 0; letter-spacing:1px;}
+.log-entry{padding:6px 12px; border-left:3px solid #2a2f3a; margin-bottom:4px;
+  font-size:12px; color:#9ca3af; font-family:'Courier New',monospace;}
+.log-entry-match{border-left-color:#00ff88;}
+.log-entry-miss{border-left-color:#ff4757;}
 </style>
 """, unsafe_allow_html=True)
 
-# ============================================
-# EEGNET ARCHITECTURE
-# ============================================
+# ═══════════════════════════════════════════════════════════
+# PREPROCESSING (MATCHES TRAINING PIPELINE)
+# ═══════════════════════════════════════════════════════════
+def preprocess_eegnet(sample, fs=160):
+    b_n, a_n = iirnotch(50, Q=30, fs=fs)
+    x = filtfilt(b_n, a_n, sample, axis=-1)
+    b, a = butter(4, [8/(fs/2), 30/(fs/2)], btype='band')
+    x = filtfilt(b, a, x, axis=-1)
+    x = (x - x.mean(axis=-1, keepdims=True)) / (x.std(axis=-1, keepdims=True) + 1e-8)
+    return x.astype(np.float32)
+
+# ═══════════════════════════════════════════════════════════
+# EEGNET
+# ═══════════════════════════════════════════════════════════
 class EEGNet(nn.Module):
     def __init__(self, n_classes=5, n_channels=64, n_time=481):
         super().__init__()
@@ -91,7 +100,6 @@ class EEGNet(nn.Module):
         self.pool2 = nn.AvgPool2d((1, 4))
         self.drop2 = nn.Dropout(0.5)
         self.fc = nn.Linear(64 * (n_time // 16), n_classes)
-
     def forward(self, x):
         x = x.unsqueeze(1)
         x = self.bn1(self.conv1(x))
@@ -105,259 +113,341 @@ class EEGNet(nn.Module):
         x = x.view(x.size(0), -1)
         return self.fc(x)
 
-# ============================================
-# LOAD MODELS
-# ============================================
+# ═══════════════════════════════════════════════════════════
+# PATHS (SAFE FOR COLAB + LOCAL)
+# ═══════════════════════════════════════════════════════════
 DRIVE = '/content/drive/MyDrive/NeuroFlow'
-LOCAL = os.path.dirname(os.path.abspath(__file__))
+try:
+    LOCAL = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    LOCAL = os.getcwd()
 
 def find_path(filename):
-    """Try Drive first, then local"""
-    drive_path = f'{DRIVE}/{filename}'
-    local_path = os.path.join(LOCAL, filename)
-    if os.path.exists(drive_path):
-        return drive_path
-    if os.path.exists(local_path):
-        return local_path
+    for base in [LOCAL, DRIVE, os.getcwd()]:
+        p = os.path.join(base, filename)
+        if os.path.exists(p):
+            return p
     return None
 
 @st.cache_resource
 def load_3class():
-    model_path = find_path('best_model.pkl')
-    scaler_path = find_path('scaler.pkl')
-    if model_path and scaler_path:
-        return joblib.load(model_path), joblib.load(scaler_path)
-    return None, None
+    m = find_path('best_model.pkl'); s = find_path('scaler.pkl')
+    return (joblib.load(m), joblib.load(s)) if (m and s) else (None, None)
 
 @st.cache_resource
 def load_5class():
-    eegnet_path = find_path('A818_NF_5class_eegnet_v2.pth')
-    if eegnet_path:
-        model = EEGNet()
-        model.load_state_dict(torch.load(eegnet_path, map_location='cpu'))
-        model.eval()
-        return model
+    p = find_path('A818_NF_5class_eegnet_v2.pth')
+    if p:
+        m = EEGNet(); m.load_state_dict(torch.load(p, map_location='cpu')); m.eval()
+        return m
     return None
 
 @st.cache_data
-def load_5class_data():
-    X_path = find_path('A818_NF_5class_X_bal.npy')
-    y_path = find_path('A818_NF_5class_y_bal.npy')
-    if X_path and y_path:
-        return np.load(X_path), np.load(y_path)
-    return None, None
+def load_data_3class():
+    X = find_path('X_all.npy'); y = find_path('y_all.npy')
+    return (np.load(X), np.load(y)) if (X and y) else (None, None)
 
-# ============================================
+@st.cache_data
+def load_data_5class():
+    X = find_path('A818_NF_5class_X_bal.npy'); y = find_path('A818_NF_5class_y_bal.npy')
+    return (np.load(X), np.load(y)) if (X and y) else (None, None)
+
+# ═══════════════════════════════════════════════════════════
+# STATE
+# ═══════════════════════════════════════════════════════════
+def init_state():
+    defaults = {
+        'buffer': None, 'playing': False, 'current_sample': None,
+        'current_true': None, 'prediction': None, 'confidence': None,
+        'session_log': [], 'samples_processed': 0, 'calibrating': False,
+        'calibration_data': [], 'mode_used': None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+init_state()
+
+# ═══════════════════════════════════════════════════════════
 # HEADER
-# ============================================
+# ═══════════════════════════════════════════════════════════
 st.title("🧠 A818_NF — Brain Signal Decoder")
-st.markdown("### Decode human intent from EEG signals using AI")
+st.markdown("##### Production BCI Software · Real-time intent classification")
 
-# ============================================
+# ═══════════════════════════════════════════════════════════
 # SIDEBAR
-# ============================================
+# ═══════════════════════════════════════════════════════════
 st.sidebar.markdown("## ⚙️ Control Panel")
 st.sidebar.markdown("---")
-
-mode = st.sidebar.radio(
-    "**Select Mode:**",
-    ["🎯 Focus Mode (3 classes)", "🔬 Extended Mode (5 classes)"]
-)
-
+mode = st.sidebar.radio("**Decoder Mode**", ["🎯 Focus Mode (3-class)", "🔬 Extended Mode (5-class)"])
+operating_mode = st.sidebar.radio("**Operating Mode**", ["🧪 Test Mode", "🧬 Live Mode"])
 st.sidebar.markdown("---")
 
 if "Focus" in mode:
     st.sidebar.markdown("**Model:** Logistic Regression")
-    st.sidebar.markdown("**Accuracy:** 91%")
-    st.sidebar.markdown("**Classes:** 3")
-    st.sidebar.markdown("**Training samples:** 2,820")
-    st.sidebar.markdown("**Calibration:** Not required")
+    st.sidebar.markdown("**Validated accuracy:** 91.0%")
+    st.sidebar.markdown("**Classes:** Rest · Left Fist · Right Fist")
 else:
     st.sidebar.markdown("**Model:** EEGNet (CNN)")
-    st.sidebar.markdown("**Accuracy:** 78%")
-    st.sidebar.markdown("**Classes:** 5")
-    st.sidebar.markdown("**Training samples:** 4,500")
-    st.sidebar.markdown("**Calibration:** 20 min")
+    st.sidebar.markdown("**Validated accuracy:** 78.4%")
+    st.sidebar.markdown("**Classes:** Rest · L.Fist · R.Fist · Both Fists · Both Feet")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 🎛️ Actions")
-
-if 'sample' not in st.session_state:
-    st.session_state.sample = None
-    st.session_state.true_label = None
-    st.session_state.pred = None
-    st.session_state.proba = None
-    st.session_state.mode_used = None
-
 col_a, col_b = st.sidebar.columns(2)
+with col_a: start_btn = st.button("▶ Stream", use_container_width=True)
+with col_b: stop_btn = st.button("⏹ Stop", use_container_width=True)
+col_c, col_d = st.sidebar.columns(2)
+with col_c: single_btn = st.button("🎲 Sample", use_container_width=True)
+with col_d: clear_btn = st.button("🧹 Clear", use_container_width=True)
 
-with col_a:
-    predict_btn = st.button("🎲 Predict")
-with col_b:
-    clear_btn = st.button("🧹 Clear")
+st.sidebar.markdown("---")
+st.sidebar.markdown("## 🎓 Calibration")
+calib_btn = st.sidebar.button("🧬 Start Calibration", use_container_width=True)
+if calib_btn:
+    st.session_state.calibrating = True
+    st.session_state.calibration_data = []
+if stop_btn:
+    st.session_state.playing = False
+if clear_btn:
+    for k in ['buffer','current_sample','prediction','confidence']:
+        st.session_state[k] = None
+    st.session_state.session_log = []
+    st.session_state.samples_processed = 0
+    st.session_state.playing = False
 
-# ============================================
-# MODE 1: 3-CLASS FOCUS
-# ============================================
+# ═══════════════════════════════════════════════════════════
+# LOAD MODELS
+# ═══════════════════════════════════════════════════════════
 if "Focus" in mode:
-    st.markdown('<div class="mode-badge badge-3">FOCUS MODE · 3 CLASSES · 91% ACCURACY</div>', unsafe_allow_html=True)
-
-    model_3, scaler_3 = load_3class()
-
-    if model_3 is None:
-        st.error("3-class model not found. Make sure `best_model.pkl` and `scaler.pkl` are on Drive.")
-        st.stop()
-
-    X_path = find_path('X_all.npy')
-    y_path = find_path('y_all.npy')
-
-    if X_path and y_path:
-        X_data = np.load(X_path)
-        y_data = np.load(y_path)
-
-        if predict_btn:
-            idx = np.random.randint(0, len(X_data))
-            st.session_state.sample = X_data[idx]
-            st.session_state.true_label = y_data[idx]
-            flat = X_data[idx].reshape(1, -1)
-            flat_s = scaler_3.transform(flat)
-            st.session_state.pred = model_3.predict(flat_s)[0]
-            st.session_state.proba = model_3.predict_proba(flat_s)[0]
-            st.session_state.mode_used = "3class"
-
-        if clear_btn:
-            st.session_state.sample = None
-
-        if st.session_state.sample is not None and st.session_state.mode_used == "3class":
-            label_map = {1: "Rest", 2: "Left Fist", 3: "Right Fist"}
-            pred = st.session_state.pred
-            true_label = st.session_state.true_label
-            proba = st.session_state.proba
-            sample = st.session_state.sample
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.markdown("### 📊 Prediction")
-                st.markdown(f"""
-                <div class="prediction-card">
-                    <p style="color:#888; font-size:13px; margin:0;">PREDICTED</p>
-                    <p style="color:#00d4ff; font-size:32px; font-weight:700; margin:5px 0;">{label_map[pred]}</p>
-                    <p style="color:#888; font-size:13px; margin:15px 0 5px 0;">TRUE LABEL</p>
-                    <p style="color:#e0e0e0; font-size:20px; margin:0;">{label_map[true_label]}</p>
-                    <p style="margin:15px 0 0 0; font-size:14px; color:{'#00ff88' if pred == true_label else '#ff5555'};">
-                        {'✅ CORRECT' if pred == true_label else '❌ INCORRECT'}
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with col2:
-                st.markdown("### 📈 Confidence")
-                for i, cls in enumerate([1, 2, 3]):
-                    st.markdown(f"**{label_map[cls]}**: {proba[i]*100:.2f}%")
-                    st.progress(float(proba[i]))
-
-            st.markdown("### 🧠 EEG Signal")
-            fig, ax = plt.subplots(figsize=(12, 3))
-            fig.patch.set_facecolor('#0e1117')
-            ax.set_facecolor('#0e1117')
-            for ch in range(min(5, sample.shape[0])):
-                ax.plot(sample[ch] + ch*100, linewidth=0.7, color='#00d4ff')
-            ax.set_xlabel('Time (samples)', color='white')
-            ax.set_ylabel('Channel', color='white')
-            ax.tick_params(colors='white')
-            ax.grid(True, alpha=0.2)
-            st.pyplot(fig)
-        else:
-            st.info("👈 Click **🎲 Predict** in the sidebar to decode a brain sample.")
-
-# ============================================
-# MODE 2: 5-CLASS EXTENDED
-# ============================================
+    model, scaler = load_3class()
+    X_data, y_data = load_data_3class()
+    label_map = {1:"Rest", 2:"Left Fist", 3:"Right Fist"}
+    accent = "#00d4ff"; badge_class = "badge-3"
+    badge_text = "FOCUS MODE · 3 CLASSES · 91%"
 else:
-    st.markdown('<div class="mode-badge badge-5">EXTENDED MODE · 5 CLASSES · 78% ACCURACY</div>', unsafe_allow_html=True)
+    model = load_5class(); scaler = None
+    X_data, y_data = load_data_5class()
+    label_map = {0:"Rest",1:"Left Fist",2:"Right Fist",3:"Both Fists",4:"Both Feet"}
+    accent = "#ff9f1c"; badge_class = "badge-5"
+    badge_text = "EXTENDED MODE · 5 CLASSES · 78%"
 
-    model_5 = load_5class()
-    X_data, y_data = load_5class_data()
+if model is None or X_data is None:
+    st.error("⚠️ Model or data files not found. Check Drive paths.")
+    st.stop()
 
-    if model_5 is None or X_data is None:
-        st.error("5-class model not found. Make sure `A818_NF_5class_eegnet_v2.pth`, `A818_NF_5class_X_bal.npy`, and `A818_NF_5class_y_bal.npy` are on Drive.")
-        st.stop()
-
-    if predict_btn:
-        idx = np.random.randint(0, len(X_data))
-        sample = X_data[idx]
-        st.session_state.sample = sample
-        st.session_state.true_label = y_data[idx]
-
-        with torch.no_grad():
-            x_t = torch.tensor(sample, dtype=torch.float32).unsqueeze(0)
-            logits = model_5(x_t)
-            proba = torch.softmax(logits, dim=1).numpy()[0]
-            pred = int(np.argmax(proba))
-
-        st.session_state.pred = pred
-        st.session_state.proba = proba
-        st.session_state.mode_used = "5class"
-
-    if clear_btn:
-        st.session_state.sample = None
-
-    if st.session_state.sample is not None and st.session_state.mode_used == "5class":
-        label_map = {0: "Rest", 1: "Left Fist", 2: "Right Fist", 3: "Both Fists", 4: "Both Feet"}
-        pred = st.session_state.pred
-        true_label = st.session_state.true_label
-        proba = st.session_state.proba
-        sample = st.session_state.sample
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown("### 📊 Prediction")
-            st.markdown(f"""
-            <div class="prediction-card">
-                <p style="color:#888; font-size:13px; margin:0;">PREDICTED</p>
-                <p style="color:#ff9f1c; font-size:32px; font-weight:700; margin:5px 0;">{label_map[pred]}</p>
-                <p style="color:#888; font-size:13px; margin:15px 0 5px 0;">TRUE LABEL</p>
-                <p style="color:#e0e0e0; font-size:20px; margin:0;">{label_map[true_label]}</p>
-                <p style="margin:15px 0 0 0; font-size:14px; color:{'#00ff88' if pred == true_label else '#ff5555'};">
-                    {'✅ CORRECT' if pred == true_label else '❌ INCORRECT'}
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with col2:
-            st.markdown("### 📈 Confidence")
-            for i, cls in enumerate([0, 1, 2, 3, 4]):
-                st.markdown(f"**{label_map[cls]}**: {proba[i]*100:.2f}%")
-                st.progress(float(proba[i]))
-
-        st.markdown("### 🧠 EEG Signal")
-        fig, ax = plt.subplots(figsize=(12, 3))
-        fig.patch.set_facecolor('#0e1117')
-        ax.set_facecolor('#0e1117')
-        for ch in range(min(5, sample.shape[0])):
-            ax.plot(sample[ch] + ch*100, linewidth=0.7, color='#ff9f1c')
-        ax.set_xlabel('Time (samples)', color='white')
-        ax.set_ylabel('Channel', color='white')
-        ax.tick_params(colors='white')
-        ax.grid(True, alpha=0.2)
-        st.pyplot(fig)
-
-        st.markdown("### 📉 Signal Statistics")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown(f'<div class="stat-box"><div class="stat-value">{sample.min()*1e6:.1f}</div><div class="stat-label">Min (µV)</div></div>', unsafe_allow_html=True)
-        with c2:
-            st.markdown(f'<div class="stat-box"><div class="stat-value">{sample.max()*1e6:.1f}</div><div class="stat-label">Max (µV)</div></div>', unsafe_allow_html=True)
-        with c3:
-            st.markdown(f'<div class="stat-box"><div class="stat-value">{sample.std()*1e6:.1f}</div><div class="stat-label">Std (µV)</div></div>', unsafe_allow_html=True)
-
+# ═══════════════════════════════════════════════════════════
+# PREDICT
+# ═══════════════════════════════════════════════════════════
+def predict(sample):
+    if "Focus" in mode:
+        flat = sample.reshape(1, -1)
+        fs = scaler.transform(flat)
+        pred = int(model.predict(fs)[0])
+        proba = model.predict_proba(fs)[0]
+        return pred, proba
     else:
-        st.info("👈 Click **🎲 Predict** in the sidebar to decode a brain sample.")
+        processed = preprocess_eegnet(sample)
+        with torch.no_grad():
+            x = torch.tensor(processed, dtype=torch.float32).unsqueeze(0)
+            logits = model(x)
+            proba = torch.softmax(logits, dim=1).numpy()[0]
+            return int(np.argmax(proba)), proba
 
-# ============================================
-# FOOTER
-# ============================================
+# ═══════════════════════════════════════════════════════════
+# ACTIONS
+# ═══════════════════════════════════════════════════════════
+if single_btn:
+    idx = random.randint(0, len(X_data)-1)
+    sample = X_data[idx]
+    pred, proba = predict(sample)
+    st.session_state.current_sample = sample
+    st.session_state.current_true = int(y_data[idx])
+    st.session_state.prediction = pred
+    st.session_state.confidence = proba
+    st.session_state.samples_processed += 1
+    entry = {'time': datetime.now().strftime('%H:%M:%S'),
+             'pred': label_map[pred], 'conf': float(max(proba))}
+    if "Test" in operating_mode:
+        entry['true'] = label_map[int(y_data[idx])]
+        entry['correct'] = pred == int(y_data[idx])
+    else:
+        entry['true'] = None; entry['correct'] = None
+    st.session_state.session_log.append(entry)
+
+if start_btn:
+    st.session_state.playing = True
+    if st.session_state.buffer is None:
+        st.session_state.buffer = X_data[random.randint(0, len(X_data)-1)].copy()
+
+if st.session_state.playing:
+    idx = random.randint(0, len(X_data)-1)
+    new_sample = X_data[idx]
+    if st.session_state.buffer is None:
+        st.session_state.buffer = new_sample.copy()
+    else:
+        buf = st.session_state.buffer
+        shift = 30
+        buf = np.roll(buf, -shift, axis=-1)
+        new_chunk = new_sample[:, -shift:] + np.random.randn(buf.shape[0], shift)*5
+        buf[:, -shift:] = new_chunk
+        st.session_state.buffer = buf
+
+    if st.session_state.samples_processed % 3 == 0:
+        pred, proba = predict(new_sample)
+        st.session_state.prediction = pred
+        st.session_state.confidence = proba
+        st.session_state.current_true = int(y_data[idx])
+        st.session_state.current_sample = new_sample
+        entry = {'time': datetime.now().strftime('%H:%M:%S'),
+                 'pred': label_map[pred], 'conf': float(max(proba))}
+        if "Test" in operating_mode:
+            entry['true'] = label_map[int(y_data[idx])]
+            entry['correct'] = pred == int(y_data[idx])
+        else:
+            entry['true'] = None; entry['correct'] = None
+        st.session_state.session_log.append(entry)
+    st.session_state.samples_processed += 1
+
+if len(st.session_state.session_log) > 20:
+    st.session_state.session_log = st.session_state.session_log[-20:]
+
+# ═══════════════════════════════════════════════════════════
+# STATUS
+# ═══════════════════════════════════════════════════════════
+s = '<div class="status-bar">'
+if st.session_state.playing: s += '<span class="status-live">🟢 STREAMING</span>'
+elif st.session_state.calibrating: s += '<span class="status-cal">🟡 CALIBRATING</span>'
+else: s += '<span class="status-idle">🔴 IDLE</span>'
+s += f' &nbsp;|&nbsp; Mode: <b>{operating_mode}</b>'
+s += f' &nbsp;|&nbsp; Decoder: <b>{mode}</b>'
+s += f' &nbsp;|&nbsp; Samples: <b>{st.session_state.samples_processed}</b>'
+s += f' &nbsp;|&nbsp; Time: <b>{datetime.now().strftime("%H:%M:%S")}</b>'
+s += '</div>'
+st.markdown(s, unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════
+# CALIBRATION
+# ═══════════════════════════════════════════════════════════
+if st.session_state.calibrating:
+    st.markdown("---")
+    st.markdown("## 🎓 Calibration Session")
+    st.info(f"**Collected:** {len(st.session_state.calibration_data)} samples. "
+            f"Record each class by holding the thought.")
+    classes = ['Rest','Left Fist','Right Fist'] if "Focus" in mode else \
+              ['Rest','Left Fist','Right Fist','Both Fists','Both Feet']
+    for cls_name in classes:
+        c1, c2 = st.columns([3,1])
+        with c1: st.markdown(f"**{cls_name}**")
+        with c2:
+            if st.button(f"Record", key=f"cal_{cls_name}"):
+                idx = random.randint(0, len(X_data)-1)
+                st.session_state.calibration_data.append((X_data[idx].copy(), cls_name))
+                st.rerun()
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("✅ Finish", type="primary"):
+            st.session_state.calibrating = False
+            st.success(f"Calibration complete: {len(st.session_state.calibration_data)} samples.")
+    with c2:
+        if st.button("❌ Cancel"):
+            st.session_state.calibrating = False
+            st.session_state.calibration_data = []
+            st.rerun()
+    st.markdown("---")
+
+# ═══════════════════════════════════════════════════════════
+# MAIN UI
+# ═══════════════════════════════════════════════════════════
+st.markdown(f'<div class="mode-badge {badge_class}">{badge_text}</div>', unsafe_allow_html=True)
+col_left, col_right = st.columns([1,1])
+
+with col_left:
+    st.markdown("### 📊 Prediction")
+    if st.session_state.prediction is not None:
+        pred = st.session_state.prediction
+        proba = st.session_state.confidence
+        pred_name = label_map[pred]
+        card_class = "pred-card" if "Focus" in mode else "pred-card pred-card-5"
+        pred_color = "#00d4ff" if "Focus" in mode else "#ff9f1c"
+        h = f'<div class="{card_class}">'
+        h += f'<p class="pred-label">Predicted Intent</p>'
+        h += f'<p class="pred-value" style="color:{pred_color};">{pred_name}</p>'
+        if "Test" in operating_mode and st.session_state.current_true is not None:
+            true_name = label_map[st.session_state.current_true]
+            h += f'<p class="true-label">Ground Truth</p>'
+            h += f'<p class="true-value">{true_name}</p>'
+            h += '<p class="correct">✅ Correct</p>' if pred == st.session_state.current_true else '<p class="incorrect">❌ Incorrect</p>'
+        else:
+            h += f'<p class="true-label">Mode</p>'
+            h += f'<p class="true-value">Live Stream · No ground truth</p>'
+        h += '</div>'
+        st.markdown(h, unsafe_allow_html=True)
+    else:
+        st.info("Click **▶ Stream** or **🎲 Sample** to begin.")
+
+with col_right:
+    st.markdown("### 📈 Confidence Distribution")
+    if st.session_state.confidence is not None:
+        proba = st.session_state.confidence
+        bar_class = "conf-bar-fill" if "Focus" in mode else "conf-bar-fill conf-bar-fill-5"
+        for i, cls in label_map.items():
+            if i < len(proba):
+                pct = float(proba[i])*100
+                st.markdown(f'<div class="conf-row"><div class="conf-name">{cls}</div>'
+                            f'<div class="conf-bar-bg"><div class="{bar_class}" style="width:{pct}%;"></div></div>'
+                            f'<div class="conf-pct">{pct:.2f}%</div></div>',
+                            unsafe_allow_html=True)
+    else:
+        st.info("Awaiting signal...")
+
+# ═══════════════════════════════════════════════════════════
+# EEG GRAPH
+# ═══════════════════════════════════════════════════════════
+st.markdown("### 🧠 Live EEG Waveforms")
+buf = st.session_state.buffer if st.session_state.buffer is not None else st.session_state.current_sample
+if buf is not None:
+    n_ch = min(6, buf.shape[0])
+    fig, axes = plt.subplots(n_ch, 1, figsize=(13,6), sharex=True)
+    fig.patch.set_facecolor('#0a0d12')
+    if n_ch == 1: axes = [axes]
+    for i, ax in enumerate(axes):
+        ax.set_facecolor('#0a0d12')
+        ax.plot(buf[i], linewidth=0.7, color=accent)
+        ax.set_ylabel(f'Ch{i+1}', color='#9ca3af', fontsize=8, rotation=0, labelpad=20)
+        ax.tick_params(colors='#9ca3af', labelsize=8)
+        ax.grid(True, alpha=0.12, color='#2a2f3a')
+        for spine in ax.spines.values(): spine.set_color('#2a2f3a')
+    axes[-1].set_xlabel('Time (samples)', color='#9ca3af', fontsize=9)
+    plt.tight_layout()
+    st.pyplot(fig); plt.close(fig)
+
+    st.markdown("### 📉 Signal Metrics")
+    c1,c2,c3,c4 = st.columns(4)
+    with c1: st.markdown(f'<div class="stat-box"><div class="stat-value">{buf.min()*1000:.2f}</div><div class="stat-label">Min (mV)</div></div>', unsafe_allow_html=True)
+    with c2: st.markdown(f'<div class="stat-box"><div class="stat-value">{buf.max()*1000:.2f}</div><div class="stat-label">Max (mV)</div></div>', unsafe_allow_html=True)
+    with c3: st.markdown(f'<div class="stat-box"><div class="stat-value">{buf.std()*1000:.2f}</div><div class="stat-label">Std (mV)</div></div>', unsafe_allow_html=True)
+    with c4: st.markdown(f'<div class="stat-box"><div class="stat-value">{buf.shape[0]}</div><div class="stat-label">Channels</div></div>', unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════
+# LOG
+# ═══════════════════════════════════════════════════════════
+st.markdown("### 📋 Session Log")
+if st.session_state.session_log:
+    for e in reversed(st.session_state.session_log[-10:]):
+        if e['true'] is not None:
+            cls = "log-entry-match" if e['correct'] else "log-entry-miss"
+            ic = "✅" if e['correct'] else "❌"
+            line = f"[{e['time']}] {ic} Pred: {e['pred']} | True: {e['true']} | Conf: {e['conf']*100:.1f}%"
+        else:
+            cls = "log-entry"
+            line = f"[{e['time']}] · Pred: {e['pred']} | Conf: {e['conf']*100:.1f}%"
+        st.markdown(f'<div class="log-entry {cls}">{line}</div>', unsafe_allow_html=True)
+else:
+    st.info("No predictions yet.")
+
 st.markdown("---")
-st.markdown('<div class="footer">A818_NF · Brain Signal Decoder · v2.0<br>Built by Asma Rizwan Rao</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">A818_NF · Brain Signal Decoder · v2.1 · Built by Asma Rizwan Rao</div>', unsafe_allow_html=True)
+
+if st.session_state.playing:
+    time.sleep(0.4)
+    st.rerun()
