@@ -1,6 +1,6 @@
 """
 A818_NF — Brain Signal Decoder
-Production BCI Software · v3.1
+Production BCI Software · v4.0 (Cloud-Ready)
 """
 
 import streamlit as st
@@ -76,21 +76,16 @@ section[data-testid="stSidebar"] {background-color:#0f1419;}
 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════
-# DEVICE INTERFACE (fill when hardware arrives)
+# DEVICE INTERFACE
 # ═══════════════════════════════════════════════════════════
 class EEGDeviceInterface:
     @staticmethod
     def detect():
-        # --- HARDWARE HOOK ---
         return (False, None, "No EEG headband detected. Connect via Bluetooth.")
-        # --- END HOOK ---
 
     @staticmethod
     def read_sample(duration_sec=3.0, fs=160, n_channels=64):
-        # --- HARDWARE HOOK ---
         return None
-        # --- END HOOK ---
-
 
 def get_device_status():
     return EEGDeviceInterface.detect()
@@ -99,6 +94,7 @@ def get_device_status():
 # PREPROCESSING
 # ═══════════════════════════════════════════════════════════
 def preprocess_eegnet(sample, fs=160):
+    sample = sample.astype(np.float32)
     b_n, a_n = iirnotch(50, Q=30, fs=fs)
     x = filtfilt(b_n, a_n, sample, axis=-1)
     b, a = butter(4, [8/(fs/2), 30/(fs/2)], btype='band')
@@ -138,43 +134,73 @@ class EEGNet(nn.Module):
         return self.fc(x)
 
 # ═══════════════════════════════════════════════════════════
-# PATHS
+# PATHS — cloud-first, local files
 # ═══════════════════════════════════════════════════════════
+APP_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
 DRIVE = '/content/drive/MyDrive/NeuroFlow'
-try:
-    LOCAL = os.path.dirname(os.path.abspath(__file__))
-except NameError:
-    LOCAL = os.getcwd()
 
 def find_path(filename):
-    for base in [LOCAL, DRIVE, os.getcwd()]:
+    # Priority: app directory (GitHub) → current dir → Drive (Colab)
+    for base in [APP_DIR, os.getcwd(), DRIVE]:
         p = os.path.join(base, filename)
         if os.path.exists(p):
             return p
     return None
 
+# Aliases so app works with either fp16 slim or original
+ALIASES = {
+    'app_data_X3.npy': ['app_data_X3.npy', 'app_data_X3_fp16.npy'],
+    'app_data_X5.npy': ['app_data_X5.npy', 'app_data_X5_fp16.npy'],
+}
+
+def find_any(primary):
+    names = ALIASES.get(primary, [primary])
+    for n in names:
+        p = find_path(n)
+        if p: return p
+    return None
+
 @st.cache_resource
 def load_3class():
-    m = find_path('best_model.pkl'); s = find_path('scaler.pkl')
-    return (joblib.load(m), joblib.load(s)) if (m and s) else (None, None)
+    m = find_path('best_model.pkl')
+    s = find_path('scaler.pkl')
+    if m and s:
+        return joblib.load(m), joblib.load(s)
+    return None, None
 
 @st.cache_resource
 def load_5class():
     p = find_path('A818_NF_5class_eegnet_v2.pth')
     if p:
-        m = EEGNet(); m.load_state_dict(torch.load(p, map_location='cpu')); m.eval()
+        m = EEGNet()
+        m.load_state_dict(torch.load(p, map_location='cpu'))
+        m.eval()
         return m
     return None
 
 @st.cache_data
 def load_data_3class():
+    X = find_any('app_data_X3.npy')
+    y = find_path('app_data_y3.npy')
+    if X and y:
+        return np.load(X).astype(np.float32), np.load(y)
+    # Fallback to original big file
     X = find_path('X_all.npy'); y = find_path('y_all.npy')
-    return (np.load(X), np.load(y)) if (X and y) else (None, None)
+    if X and y:
+        return np.load(X), np.load(y)
+    return None, None
 
 @st.cache_data
 def load_data_5class():
-    X = find_path('A818_NF_5class_X_bal.npy'); y = find_path('A818_NF_5class_y_bal.npy')
-    return (np.load(X), np.load(y)) if (X and y) else (None, None)
+    X = find_any('app_data_X5.npy')
+    y = find_path('app_data_y5.npy')
+    if X and y:
+        return np.load(X).astype(np.float32), np.load(y)
+    X = find_path('A818_NF_5class_X_bal.npy')
+    y = find_path('A818_NF_5class_y_bal.npy')
+    if X and y:
+        return np.load(X), np.load(y)
+    return None, None
 
 # ═══════════════════════════════════════════════════════════
 # STATE
@@ -184,8 +210,7 @@ def init_state():
         'buffer': None, 'playing': False, 'current_sample': None,
         'current_true': None, 'prediction': None, 'confidence': None,
         'session_log': [], 'samples_processed': 0, 'calibrating': False,
-        'calibration_data': [], 'device_connected': False, 'device_name': None,
-        'last_mode_key': None,
+        'calibration_data': [], 'last_mode_key': None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -202,8 +227,6 @@ st.markdown("##### Production BCI Software · Real-time intent classification")
 # DEVICE
 # ═══════════════════════════════════════════════════════════
 connected, device_name, device_msg = get_device_status()
-st.session_state.device_connected = connected
-st.session_state.device_name = device_name
 
 # ═══════════════════════════════════════════════════════════
 # SIDEBAR
@@ -215,7 +238,6 @@ mode = st.sidebar.radio("**Decoder Mode**", ["🎯 Focus Mode (3-class)", "🔬 
 operating_mode = st.sidebar.radio("**Operating Mode**", ["🧪 Bench Test", "🧬 Live Recording"])
 live_mode = "Live" in operating_mode
 
-# Force clear when mode changes
 mode_key = f"{mode}|{operating_mode}"
 if st.session_state.last_mode_key != mode_key:
     st.session_state.buffer = None
@@ -263,11 +285,10 @@ else:
     accent = "#ff9f1c"; badge_class = "badge-5"
     badge_text = "EXTENDED MODE · 5 CLASSES · 78%"
 
-if model is None:
-    st.error("⚠️ Model file not found on Drive.")
+if model is None or X_data is None:
+    st.error("⚠️ Model or data files not found. Check repository contents.")
     st.stop()
 
-# Hard block: Live Mode without device
 block_live = live_mode and not connected
 if block_live:
     st.session_state.prediction = None
@@ -277,19 +298,14 @@ if block_live:
     st.session_state.playing = False
 
 col_a, col_b = st.sidebar.columns(2)
-with col_a:
-    start_btn = st.button("▶ Stream", use_container_width=True, disabled=block_live)
-with col_b:
-    stop_btn = st.button("⏹ Stop", use_container_width=True)
+with col_a: start_btn = st.button("▶ Stream", use_container_width=True, disabled=block_live)
+with col_b: stop_btn = st.button("⏹ Stop", use_container_width=True)
 
 col_c, col_d = st.sidebar.columns(2)
-with col_c:
-    single_btn = st.button("🎲 Sample", use_container_width=True, disabled=block_live)
-with col_d:
-    clear_btn = st.button("🧹 Clear", use_container_width=True)
+with col_c: single_btn = st.button("🎲 Sample", use_container_width=True, disabled=block_live)
+with col_d: clear_btn = st.button("🧹 Clear", use_container_width=True)
 
-if stop_btn:
-    st.session_state.playing = False
+if stop_btn: st.session_state.playing = False
 if clear_btn:
     for k in ['buffer','current_sample','prediction','confidence']:
         st.session_state[k] = None
@@ -305,7 +321,7 @@ if calib_btn:
     st.session_state.calibration_data = []
 
 # ═══════════════════════════════════════════════════════════
-# LIVE MODE BANNERS
+# BANNERS
 # ═══════════════════════════════════════════════════════════
 if live_mode and not connected:
     st.markdown("""
@@ -319,7 +335,6 @@ if live_mode and not connected:
         <p style="margin-top:14px;">Or switch to <code>🧪 Bench Test</code> to use saved dataset.</p>
     </div>
     """, unsafe_allow_html=True)
-
 if live_mode and connected:
     st.markdown(f"""
     <div class="device-banner device-ok">
@@ -333,7 +348,7 @@ if live_mode and connected:
 # ═══════════════════════════════════════════════════════════
 def predict(sample):
     if "Focus" in mode:
-        flat = sample.reshape(1, -1)
+        flat = sample.reshape(1, -1).astype(np.float32)
         fs = scaler.transform(flat)
         pred = int(model.predict(fs)[0])
         proba = model.predict_proba(fs)[0]
@@ -351,11 +366,10 @@ def predict(sample):
 # ═══════════════════════════════════════════════════════════
 import random
 
-# BENCH TEST MODE
 if not live_mode and X_data is not None:
     if single_btn:
         idx = random.randint(0, len(X_data)-1)
-        sample = X_data[idx]
+        sample = X_data[idx].astype(np.float32)
         pred, proba = predict(sample)
         st.session_state.current_sample = sample
         st.session_state.current_true = int(y_data[idx])
@@ -371,11 +385,11 @@ if not live_mode and X_data is not None:
     if start_btn:
         st.session_state.playing = True
         if st.session_state.buffer is None:
-            st.session_state.buffer = X_data[random.randint(0, len(X_data)-1)].copy()
+            st.session_state.buffer = X_data[random.randint(0, len(X_data)-1)].astype(np.float32).copy()
 
     if st.session_state.playing:
         idx = random.randint(0, len(X_data)-1)
-        new_sample = X_data[idx]
+        new_sample = X_data[idx].astype(np.float32)
         if st.session_state.buffer is None:
             st.session_state.buffer = new_sample.copy()
         else:
@@ -399,7 +413,6 @@ if not live_mode and X_data is not None:
             })
         st.session_state.samples_processed += 1
 
-# LIVE MODE (only runs when device connected)
 if live_mode and connected:
     if single_btn:
         sample = EEGDeviceInterface.read_sample()
@@ -416,8 +429,7 @@ if live_mode and connected:
                 'correct': None, 'conf': float(max(proba))
             })
 
-    if start_btn:
-        st.session_state.playing = True
+    if start_btn: st.session_state.playing = True
 
     if st.session_state.playing:
         sample = EEGDeviceInterface.read_sample()
@@ -446,14 +458,10 @@ if len(st.session_state.session_log) > 20:
 # STATUS BAR
 # ═══════════════════════════════════════════════════════════
 s = '<div class="status-bar">'
-if block_live:
-    s += '<span class="status-nowear">🔴 NO DEVICE — WEAR HEADBAND</span>'
-elif st.session_state.playing:
-    s += '<span class="status-live">🟢 STREAMING</span>'
-elif st.session_state.calibrating:
-    s += '<span class="status-cal">🟡 CALIBRATING</span>'
-else:
-    s += '<span class="status-idle">🔴 IDLE</span>'
+if block_live: s += '<span class="status-nowear">🔴 NO DEVICE — WEAR HEADBAND</span>'
+elif st.session_state.playing: s += '<span class="status-live">🟢 STREAMING</span>'
+elif st.session_state.calibrating: s += '<span class="status-cal">🟡 CALIBRATING</span>'
+else: s += '<span class="status-idle">🔴 IDLE</span>'
 s += f' &nbsp;|&nbsp; Mode: <b>{operating_mode}</b>'
 s += f' &nbsp;|&nbsp; Decoder: <b>{mode}</b>'
 s += f' &nbsp;|&nbsp; Device: <b>{"Connected" if connected else "None"}</b>'
@@ -468,7 +476,6 @@ st.markdown(s, unsafe_allow_html=True)
 if st.session_state.calibrating:
     st.markdown("---")
     st.markdown("## 🎓 Calibration Session")
-
     if live_mode and not connected:
         st.error("⚠️ Headband not detected. Wear and adjust the headband before recording.")
         st.markdown("""
@@ -489,8 +496,7 @@ if st.session_state.calibrating:
                   ['Rest','Left Fist','Right Fist','Both Fists','Both Feet']
         for cls_name in classes:
             c1, c2 = st.columns([3,1])
-            with c1:
-                st.markdown(f"**{cls_name}**")
+            with c1: st.markdown(f"**{cls_name}**")
             with c2:
                 if st.button(f"● Record", key=f"cal_{cls_name}"):
                     if live_mode:
@@ -509,8 +515,7 @@ if st.session_state.calibrating:
         with c1:
             if st.button("✅ Finish Calibration", type="primary"):
                 n = len(st.session_state.calibration_data)
-                if n < 5:
-                    st.warning(f"Only {n} samples.")
+                if n < 5: st.warning(f"Only {n} samples.")
                 else:
                     st.session_state.calibrating = False
                     st.success(f"Calibration complete · {n} samples.")
@@ -522,7 +527,7 @@ if st.session_state.calibrating:
         st.markdown("---")
 
 # ═══════════════════════════════════════════════════════════
-# MAIN UI
+# MAIN
 # ═══════════════════════════════════════════════════════════
 st.markdown(f'<div class="mode-badge {badge_class}">{badge_text}</div>', unsafe_allow_html=True)
 col_left, col_right = st.columns([1,1])
@@ -570,7 +575,7 @@ with col_right:
         st.info("Awaiting signal...")
 
 # ═══════════════════════════════════════════════════════════
-# EEG GRAPH
+# GRAPH
 # ═══════════════════════════════════════════════════════════
 st.markdown("### 🧠 Live EEG Waveforms")
 buf = None
@@ -600,10 +605,8 @@ if buf is not None and not block_live:
     with c3: st.markdown(f'<div class="stat-box"><div class="stat-value">{buf.std()*1000:.2f}</div><div class="stat-label">Std (mV)</div></div>', unsafe_allow_html=True)
     with c4: st.markdown(f'<div class="stat-box"><div class="stat-value">{buf.shape[0]}</div><div class="stat-label">Channels</div></div>', unsafe_allow_html=True)
 else:
-    if block_live:
-        st.info("🔴 No signal. Wear the headband to start streaming.")
-    else:
-        st.info("No signal buffer yet.")
+    if block_live: st.info("🔴 No signal. Wear the headband to start streaming.")
+    else: st.info("No signal buffer yet.")
 
 # ═══════════════════════════════════════════════════════════
 # LOG
@@ -620,12 +623,10 @@ if st.session_state.session_log and not block_live:
             line = f"[{e['time']}] · Pred: {e['pred']} | Conf: {e['conf']*100:.1f}%"
         st.markdown(f'<div class="log-entry {cls}">{line}</div>', unsafe_allow_html=True)
 else:
-    if block_live:
-        st.info("Log empty — no device connected.")
-    else:
-        st.info("No predictions yet.")
+    st.info("Log empty." if block_live else "No predictions yet.")
+
 st.markdown("---")
-st.markdown('<div class="footer">A818_NF · Brain Signal Decoder · v3.1 · Built by Asma Rizwan Rao</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">A818_NF · Brain Signal Decoder · v4.0 · Built by Asma Rizwan Rao</div>', unsafe_allow_html=True)
 
 if st.session_state.playing and not block_live:
     time.sleep(0.4)
